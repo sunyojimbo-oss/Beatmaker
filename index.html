@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Beat Maker</title>
+<style>
+:root{--bg:#111;--fg:#eee;--cell:#262626;--on:#ff4d6d;--beat:#333;--acc:#ffd166}
+body{margin:0;padding:16px;background:var(--bg);color:var(--fg);font-family:system-ui,sans-serif}
+h1{font-size:20px;margin:0 0 12px}
+.bar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:14px}
+button{background:#2d2d2d;color:var(--fg);border:0;border-radius:8px;padding:10px 14px;font-size:15px;cursor:pointer}
+button.go{background:var(--on)}
+input[type=range]{width:110px}
+.grid{overflow-x:auto}
+.row{display:flex;align-items:center;gap:4px;margin-bottom:6px;min-width:560px}
+.name{width:52px;font-size:13px;opacity:.8}
+.c{flex:1;height:38px;background:var(--cell);border-radius:5px;cursor:pointer}
+.c.q{background:var(--beat)}
+.c.on{background:var(--on)}
+.c.now{outline:2px solid var(--acc)}
+</style>
+</head>
+<body>
+<h1>Beat Maker</h1>
+<div class="bar">
+  <button id="play" class="go">Play</button>
+  <label>BPM <span id="bv">120</span> <input id="bpm" type="range" min="60" max="200" value="120"></label>
+  <label>Swing <input id="swing" type="range" min="0" max="50" value="0"></label>
+  <button id="rand">Randomize</button>
+  <button id="clr">Clear</button>
+</div>
+<div class="grid" id="grid"></div>
+
+<script>
+const N=16, names=["Kick","Snare","Clap","Hat","Open","Tom"];
+const pat=names.map(()=>Array(N).fill(0));
+let ctx,playing=false,step=0,next=0,timer=null;
+
+// default beat
+[0,4,8,12].forEach(i=>pat[0][i]=1);
+[4,12].forEach(i=>pat[1][i]=1);
+[0,2,4,6,8,10,12,14].forEach(i=>pat[3][i]=1);
+
+// build grid
+const grid=document.getElementById("grid");
+names.forEach((n,r)=>{
+  const row=document.createElement("div");row.className="row";
+  row.innerHTML=`<div class="name">${n}</div>`;
+  for(let i=0;i<N;i++){
+    const c=document.createElement("div");
+    c.className="c"+(i%4==0?" q":"")+(pat[r][i]?" on":"");
+    c.onclick=()=>{pat[r][i]^=1;c.classList.toggle("on")};
+    c.dataset.i=i;row.appendChild(c);
+  }
+  grid.appendChild(row);
+});
+const rows=[...document.querySelectorAll(".row")];
+
+// sounds (synthesized, no samples needed)
+function noise(t,dur){
+  const b=ctx.createBuffer(1,ctx.sampleRate*dur,ctx.sampleRate),d=b.getChannelData(0);
+  for(let i=0;i<d.length;i++)d[i]=Math.random()*2-1;
+  const s=ctx.createBufferSource();s.buffer=b;return s;
+}
+function env(p,t,peak,dur){p.setValueAtTime(peak,t);p.exponentialRampToValueAtTime(.001,t+dur)}
+function tone(t,f0,f1,dur,peak){
+  const o=ctx.createOscillator(),g=ctx.createGain();
+  o.frequency.setValueAtTime(f0,t);o.frequency.exponentialRampToValueAtTime(f1,t+dur);
+  env(g.gain,t,peak,dur);o.connect(g).connect(ctx.destination);o.start(t);o.stop(t+dur);
+}
+function nz(t,dur,peak,type,freq){
+  const s=noise(t,dur),f=ctx.createBiquadFilter(),g=ctx.createGain();
+  f.type=type;f.frequency.value=freq;env(g.gain,t,peak,dur);
+  s.connect(f).connect(g).connect(ctx.destination);s.start(t);s.stop(t+dur);
+}
+const sounds=[
+  t=>tone(t,150,40,.4,1),
+  t=>{tone(t,220,120,.15,.5);nz(t,.2,.7,"highpass",1500)},
+  t=>{[0,.012,.024].forEach(o=>nz(t+o,.06,.6,"bandpass",1200));nz(t+.03,.2,.5,"bandpass",1200)},
+  t=>nz(t,.05,.4,"highpass",7000),
+  t=>nz(t,.3,.35,"highpass",6000),
+  t=>tone(t,200,90,.3,.8)
+];
+
+// scheduler
+function tick(){
+  const spb=60/bpm.value/4;
+  while(next<ctx.currentTime+.1){
+    const sw=(step%2?swing.value/100*spb:0), t=next+sw;
+    pat.forEach((p,r)=>{if(p[step])sounds[r](t)});
+    const s=step;
+    setTimeout(()=>rows.forEach(r=>{
+      r.querySelectorAll(".c").forEach((c,i)=>c.classList.toggle("now",i==s));
+    }),Math.max(0,(t-ctx.currentTime)*1000));
+    next+=spb;step=(step+1)%N;
+  }
+}
+play.onclick=()=>{
+  if(!ctx)ctx=new (window.AudioContext||window.webkitAudioContext)();
+  if(playing){clearInterval(timer);playing=false;play.textContent="Play";
+    document.querySelectorAll(".now").forEach(c=>c.classList.remove("now"));return}
+  ctx.resume();step=0;next=ctx.currentTime+.05;playing=true;play.textContent="Stop";
+  timer=setInterval(tick,25);
+};
+bpm.oninput=()=>bv.textContent=bpm.value;
+clr.onclick=()=>{pat.forEach(p=>p.fill(0));document.querySelectorAll(".c").forEach(c=>c.classList.remove("on"))};
+rand.onclick=()=>{
+  const dens=[.2,.15,.1,.6,.1,.1];
+  pat.forEach((p,r)=>p.forEach((_,i)=>p[i]=Math.random()<dens[r]?1:0));
+  rows.forEach((row,r)=>row.querySelectorAll(".c").forEach((c,i)=>c.classList.toggle("on",!!pat[r][i])));
+};
+</script>
+</body>
+</html>

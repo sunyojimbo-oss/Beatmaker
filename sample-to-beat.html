@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sample to Beat</title>
+<style>
+body{margin:0;padding:16px;background:#111;color:#eee;font-family:system-ui,sans-serif}
+h1{font-size:20px;margin:0 0 12px}
+.bar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:14px}
+button,label.f{background:#2d2d2d;color:#eee;border:0;border-radius:8px;padding:10px 14px;font-size:15px;cursor:pointer}
+button.go{background:#ff4d6d}
+input[type=file]{display:none}
+#info{opacity:.8;font-size:14px;margin-bottom:12px}
+.grid{overflow-x:auto}
+.row{display:flex;align-items:center;gap:4px;margin-bottom:6px;min-width:560px}
+.name{width:52px;font-size:13px;opacity:.8}
+.c{flex:1;height:38px;background:#262626;border-radius:5px;cursor:pointer}
+.c.q{background:#333}.c.on{background:#ff4d6d}.c.now{outline:2px solid #ffd166}
+input[type=range]{width:100px}
+</style>
+</head>
+<body>
+<h1>Sample to Beat</h1>
+<div class="bar">
+  <label class="f">Pick a song / sample<input id="file" type="file" accept="audio/*"></label>
+  <button id="play" class="go" disabled>Play</button>
+  <button id="regen" disabled>New variation</button>
+  <button id="exp1" disabled>Export beat WAV</button>
+  <button id="exp2" disabled>Export beat + sample WAV</button>
+</div>
+<div class="bar">
+  <label>Beat vol <input id="vol" type="range" min="0" max="100" value="70"></label>
+  <label>Sample vol <input id="svol" type="range" min="0" max="100" value="80"></label>
+</div>
+<div id="info">Pick an audio file and it'll find the tempo and build a beat around it.</div>
+<div class="grid" id="grid"></div>
+
+<script>
+const N=16,names=["Kick","Snare","Hat","Open"];
+const pat=names.map(()=>Array(N).fill(0));
+let ctx,buf,bpm=120,offset=0,strength=Array(N).fill(0),playing=false,src,t0,step=0,next=0,timer,beatGain,sampGain;
+
+const grid=document.getElementById("grid");
+names.forEach((n,r)=>{
+  const row=document.createElement("div");row.className="row";
+  row.innerHTML=`<div class="name">${n}</div>`;
+  for(let i=0;i<N;i++){
+    const c=document.createElement("div");c.className="c"+(i%4==0?" q":"");
+    c.onclick=()=>{pat[r][i]^=1;c.classList.toggle("on")};row.appendChild(c);
+  }
+  grid.appendChild(row);
+});
+const rows=[...document.querySelectorAll(".row")];
+function paint(){rows.forEach((row,r)=>row.querySelectorAll(".c").forEach((c,i)=>c.classList.toggle("on",!!pat[r][i])))}
+
+// ---- analysis ----
+function analyze(b){
+  const sr=b.sampleRate,d=b.getChannelData(0),h=512,n=Math.floor(d.length/h);
+  const e=new Float32Array(n);
+  for(let i=0;i<n;i++){let s=0;for(let j=0;j<h;j++){const v=d[i*h+j];s+=v*v}e[i]=Math.sqrt(s/h)}
+  const o=new Float32Array(n);
+  for(let i=1;i<n;i++)o[i]=Math.max(0,e[i]-e[i-1]);
+  const fs=sr/h;
+  // tempo via autocorrelation
+  let best=0,bl=0;
+  for(let B=80;B<=160;B+=.5){
+    const L=fs*60/B;let s=0;
+    for(let k=1;k*L<n&&k<64;k++){const i=Math.round(k*L);for(let m=0;m+i<n;m+=1)s+=o[m]*o[m+i]}
+    if(s>best){best=s;bl=B}
+  }
+  bpm=bl;const P=fs*60/bpm;
+  // beat phase
+  let bp=0,bs=0;
+  for(let p=0;p<P;p++){let s=0;for(let x=p;x<n;x+=P)s+=o[Math.round(x)];if(s>bs){bs=s;bp=p}}
+  // per-16th strength over the whole song, then find the downbeat
+  const sp=P/4,st=Array(16).fill(0);
+  for(let k=0;bp+k*sp<n;k++)st[k%16]+=o[Math.round(bp+k*sp)];
+  let dn=0,dv=0;
+  for(let s=0;s<16;s+=4){if(st[s]>dv){dv=st[s];dn=s}}
+  strength=st.map((_,i)=>st[(i+dn)%16]);
+  const mx=Math.max(...strength)||1;strength=strength.map(v=>v/mx);
+  offset=(bp+dn*sp)/fs;
+}
+
+// ---- pattern ----
+function gen(){
+  pat.forEach(p=>p.fill(0));
+  [0,8].forEach(i=>pat[0][i]=1);
+  [4,12].forEach(i=>pat[1][i]=1);
+  for(let i=0;i<N;i++){
+    if(i%4==2||i%2==0)pat[2][i]=1;
+    if(![0,4,8,12].includes(i)&&strength[i]>.55&&Math.random()<.8)pat[0][i]=1;
+    if(![0,4,8,12].includes(i)&&strength[i]>.4&&i%2==1&&Math.random()<.5)pat[2][i]=1;
+  }
+  if(Math.random()<.6)pat[3][14]=1;
+  if(Math.random()<.4)pat[1][15]=1;
+  paint();
+}
+
+// ---- sounds ----
+function env(p,t,pk,du){p.setValueAtTime(pk,t);p.exponentialRampToValueAtTime(.001,t+du)}
+function tone(t,f0,f1,du,pk){
+  const o=ctx.createOscillator(),g=ctx.createGain();
+  o.frequency.setValueAtTime(f0,t);o.frequency.exponentialRampToValueAtTime(f1,t+du);
+  env(g.gain,t,pk,du);o.connect(g).connect(beatGain);o.start(t);o.stop(t+du);
+}
+function nz(t,du,pk,type,fr){
+  const bf=ctx.createBuffer(1,ctx.sampleRate*du,ctx.sampleRate),d=bf.getChannelData(0);
+  for(let i=0;i<d.length;i++)d[i]=Math.random()*2-1;
+  const s=ctx.createBufferSource();s.buffer=bf;
+  const f=ctx.createBiquadFilter(),g=ctx.createGain();f.type=type;f.frequency.value=fr;
+  env(g.gain,t,pk,du);s.connect(f).connect(g).connect(beatGain);s.start(t);s.stop(t+du);
+}
+const snd=[
+  t=>tone(t,150,40,.4,1),
+  t=>{tone(t,220,120,.15,.5);nz(t,.2,.7,"highpass",1500)},
+  t=>nz(t,.05,.4,"highpass",7000),
+  t=>nz(t,.3,.35,"highpass",6000)
+];
+
+// ---- playback ----
+function tick(){
+  const spb=60/bpm/4;
+  while(next<ctx.currentTime+.1){
+    pat.forEach((p,r)=>{if(p[step])snd[r](next)});
+    const s=step;
+    setTimeout(()=>rows.forEach(r=>r.querySelectorAll(".c").forEach((c,i)=>c.classList.toggle("now",i==s))),Math.max(0,(next-ctx.currentTime)*1000));
+    next+=spb;step=(step+1)%N;
+  }
+}
+function stop(){
+  clearInterval(timer);playing=false;play.textContent="Play";
+  try{src.stop()}catch(e){}
+  document.querySelectorAll(".now").forEach(c=>c.classList.remove("now"));
+}
+play.onclick=()=>{
+  if(playing)return stop();
+  ctx.resume();
+  beatGain=ctx.createGain();beatGain.gain.value=vol.value/100;beatGain.connect(ctx.destination);
+  sampGain=ctx.createGain();sampGain.gain.value=svol.value/100;sampGain.connect(ctx.destination);
+  src=ctx.createBufferSource();src.buffer=buf;src.connect(sampGain);
+  t0=ctx.currentTime+.1;src.start(t0);src.onended=()=>{if(playing)stop()};
+  step=0;next=t0+offset;playing=true;play.textContent="Stop";
+  timer=setInterval(tick,25);
+};
+vol.oninput=()=>{if(beatGain)beatGain.gain.value=vol.value/100};
+svol.oninput=()=>{if(sampGain)sampGain.gain.value=svol.value/100};
+regen.onclick=gen;
+
+// ---- WAV export ----
+function toWav(ab){
+  const ch=ab.numberOfChannels,len=ab.length,sr=ab.sampleRate;
+  const out=new DataView(new ArrayBuffer(44+len*ch*2));
+  const w=(o,s)=>{for(let i=0;i<s.length;i++)out.setUint8(o+i,s.charCodeAt(i))};
+  w(0,"RIFF");out.setUint32(4,36+len*ch*2,true);w(8,"WAVEfmt ");
+  out.setUint32(16,16,true);out.setUint16(20,1,true);out.setUint16(22,ch,true);
+  out.setUint32(24,sr,true);out.setUint32(28,sr*ch*2,true);out.setUint16(32,ch*2,true);out.setUint16(34,16,true);
+  w(36,"data");out.setUint32(40,len*ch*2,true);
+  const data=[...Array(ch).keys()].map(c=>ab.getChannelData(c));
+  let p=44;
+  for(let i=0;i<len;i++)for(let c=0;c<ch;c++){
+    const v=Math.max(-1,Math.min(1,data[c][i]));
+    out.setInt16(p,v<0?v*32768:v*32767,true);p+=2;
+  }
+  return new Blob([out],{type:"audio/wav"});
+}
+async function exportWav(withSample){
+  if(playing)stop();
+  info.textContent="Rendering...";
+  const realCtx=ctx,realBG=beatGain;
+  try{
+    const sr=buf.sampleRate;
+    const off=new OfflineAudioContext(2,Math.ceil(buf.duration*sr),sr);
+    ctx=off;
+    beatGain=off.createGain();beatGain.gain.value=vol.value/100;beatGain.connect(off.destination);
+    if(withSample){
+      const s=off.createBufferSource(),g=off.createGain();
+      s.buffer=buf;g.gain.value=svol.value/100;s.connect(g).connect(off.destination);s.start(0);
+    }
+    const spb=60/bpm/4;
+    for(let k=0;offset+k*spb<buf.duration;k++){
+      const st=k%16;
+      pat.forEach((p,r)=>{if(p[st])snd[r](offset+k*spb)});
+    }
+    const rendered=await off.startRendering();
+    const url=URL.createObjectURL(toWav(rendered));
+    const a=document.createElement("a");
+    a.href=url;a.download=withSample?"beat-with-sample.wav":"beat.wav";
+    document.body.appendChild(a);a.click();a.remove();
+    info.textContent="Done, check your downloads. Tempo was ~"+bpm.toFixed(1)+" BPM.";
+  }catch(err){info.textContent="Export failed: "+err.message}
+  finally{ctx=realCtx;beatGain=realBG}
+}
+exp1.onclick=()=>exportWav(false);
+exp2.onclick=()=>exportWav(true);
+
+file.onchange=async e=>{
+  const f=e.target.files[0];if(!f)return;
+  if(playing)stop();
+  info.textContent="Analyzing...";
+  try{
+    ctx=ctx||new (window.AudioContext||window.webkitAudioContext)();
+    buf=await ctx.decodeAudioData(await f.arrayBuffer());
+    analyze(buf);gen();
+    info.textContent=`${f.name}: ~${bpm.toFixed(1)} BPM. Tap squares to edit the beat. If the tempo feels off, it may be double/half time.`;
+    play.disabled=false;regen.disabled=false;exp1.disabled=false;exp2.disabled=false;
+  }catch(err){info.textContent="Couldn't read that file. Try an mp3 or wav."}
+};
+</script>
+</body>
+</html>
